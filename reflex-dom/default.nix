@@ -10,6 +10,7 @@ mkDerivation {
   ] ++ (if ghc.isGhcjs or false then [
   ] else if stdenv.isDarwin then [
     jsaddle-wkwebview
+    jsaddle-webkit2gtk
   ] else [
     jsaddle-webkit2gtk
   ]);

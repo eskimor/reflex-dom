@@ -22,7 +22,7 @@ import GHCJS.Buffer
 import GHCJS.DOM.CloseEvent
 import GHCJS.DOM.EventM (on)
 import GHCJS.DOM.MessageEvent
-import GHCJS.DOM.Types hiding (Text)
+import GHCJS.DOM.Types hiding (Text, ByteString)
 import qualified GHCJS.DOM.WebSocket as GD
 import GHCJS.Foreign (JSType(..), jsTypeOf)
 import GHCJS.Types
@@ -33,7 +33,7 @@ import Language.Javascript.JSaddle.Types (ghcjsPure)
 import Language.Javascript.JSaddle.Object (new, jsg)
 #endif
 
-data JSWebSocket = JSWebSocket { unWebSocket :: WebSocket }
+newtype JSWebSocket = JSWebSocket { unWebSocket :: WebSocket }
 
 class IsWebSocketMessage a where
   webSocketSend :: JSWebSocket -> a -> JSM ()
@@ -48,14 +48,14 @@ instance IsWebSocketMessage ByteString where
                           else do
                             ref <- ghcjsPure (getArrayBuffer b) >>= ghcjsPure . jsval
                             js_dataView off len ref -- new (jsg "DataView") (ref, off, len)
-    GD.send ws $ Just ab
+    GD.send ws ab
 
 -- Use plaintext websocket communication for Text, and String
 instance IsWebSocketMessage Text where
   webSocketSend (JSWebSocket ws) = GD.sendString ws . T.unpack
 
 closeWebSocket :: JSWebSocket -> Word -> Text -> JSM ()
-closeWebSocket (JSWebSocket ws) = GD.close ws
+closeWebSocket (JSWebSocket ws) code reason = GD.close ws (Just code) (Just reason)
 
 newWebSocket
   :: a
@@ -66,7 +66,7 @@ newWebSocket
   -> ((Bool, Word, Text) -> JSM ()) -- onclose
   -> JSM JSWebSocket
 newWebSocket _ url onMessage onOpen onError onClose = do
-  ws <- GD.newWebSocket url (Just [] :: Maybe [Text])
+  ws <- GD.newWebSocket url ([] :: [Text])
   GD.setBinaryType ws "arraybuffer"
   _ <- on ws GD.open $ liftJSM onOpen
   _ <- on ws GD.error $ liftJSM onError

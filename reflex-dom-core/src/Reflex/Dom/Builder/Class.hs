@@ -170,7 +170,7 @@ instance (Reflex t) => Default (TextNodeConfig t) where
     , _textNodeConfig_setContents = Nothing
     }
 
-data TextNode d t = TextNode
+newtype TextNode d t = TextNode
   { _textNode_raw :: RawTextNode d
   }
 
