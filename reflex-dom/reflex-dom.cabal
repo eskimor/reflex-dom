@@ -49,7 +49,6 @@ library
   hs-source-dirs: src
   if flag(android)
     hs-source-dirs: src-android
-    other-modules: Reflex.Dom.Android.MainWidget
     build-depends:
       aeson,
       android-activity == 0.1.*,
@@ -88,6 +87,9 @@ library
   exposed-modules:
     Reflex.Dom
     Reflex.Dom.Internal
+  if flag(android)
+    exposed-modules:
+      Reflex.Dom.Android.MainWidget
   reexported-modules:
       Foreign.JavaScript.TH
     , Foreign.JavaScript.Orphans
