@@ -26,6 +26,9 @@ in mkDerivation (addGcTestDepends {
     hashable
   ] else []);
 
+  #TODO: Get hlint working for cross-compilation
+  doCheck = stdenv.hostPlatform == stdenv.buildPlatform && !(ghc.isGhcjs or false);
+
   # The headless browser run as part of the tests will exit without this
   preBuild = ''
     export HOME="$PWD"
