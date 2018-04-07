@@ -17,6 +17,7 @@ import android.webkit.WebResourceResponse;
 import android.webkit.WebSettings;
 import android.webkit.WebView;
 import android.webkit.WebViewClient;
+import android.widget.ShareActionProvider;
 import android.graphics.Bitmap;
 import java.io.IOException;
 import java.io.InputStream;
@@ -29,6 +30,16 @@ import systems.obsidian.HaskellActivity;
 
 public class MainWidget {
   private static Object startMainWidget(final HaskellActivity a, String url, long jsaddleCallbacks, final String initialJS) {
+    class AndroidShare {
+      @JavascriptInterface
+      public void share(String url) {
+        Intent i = new Intent(Intent.ACTION_SEND, Uri.parse(url));
+        i.putExtra(Intent.EXTRA_TEXT, url);
+        i.setType("text/plain");
+        a.startActivity(i);
+      }
+    }
+
     CookieManager.setAcceptFileSchemeCookies(true); //TODO: Can we do this just for our own WebView?
 
     // Remove title and notification bars
@@ -43,6 +54,7 @@ public class MainWidget {
     ws.setAllowUniversalAccessFromFileURLs(true);
     ws.setDomStorageEnabled(true);
     wv.setWebContentsDebuggingEnabled(true);
+    wv.addJavascriptInterface(new AndroidShare(), "androidShare");
     // allow video to play without user interaction
     wv.getSettings().setMediaPlaybackRequiresUserGesture(false);
 
