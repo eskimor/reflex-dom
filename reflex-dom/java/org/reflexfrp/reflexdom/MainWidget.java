@@ -23,6 +23,7 @@ import java.io.IOException;
 import java.io.InputStream;
 import android.content.Intent;
 import android.content.ActivityNotFoundException;
+import android.webkit.ValueCallback;
 
 import java.nio.charset.StandardCharsets;
 
@@ -57,6 +58,37 @@ public class MainWidget {
     wv.addJavascriptInterface(new AndroidShare(), "androidShare");
     // allow video to play without user interaction
     wv.getSettings().setMediaPlaybackRequiresUserGesture(false);
+
+    a.setBackEventListener(new HaskellActivity.BackEventListener() {
+            public void backButtonClicked(final ValueCallback<String> handled) {
+                // Does not work properly (page reloads or something ..)
+                // if (wv.canGoBack()) {
+                //     wv.goBack();
+                //     return true;
+                // }
+                // return false;
+                wv.evaluateJavascript("window.gonimoHistoryCanGoBack", new ValueCallback<String>() {
+                        public void onReceiveValue (String value) {
+                            Log.i("reflex", "onReceiveValue called: '" + value + "'");
+                            if(value.equals("true")) {
+                                a.runOnUiThread(new Runnable() {
+                                        @TargetApi(Build.VERSION_CODES.LOLLIPOP)
+                                        @Override
+                                        public void run() {
+                                            Log.i("reflex", "gonimoHistoryGoBack() ....");
+                                            wv.evaluateJavascript("window.gonimoHistoryGoBack()", new ValueCallback<String>() {
+                                                    public void onReceiveValue (String value)  {
+                                                        Log.i("reflex", "gonimoHistoryGoBack result:" + value);
+                                                    }
+                                                });
+                                        }
+                                    });
+                            }
+                            handled.onReceiveValue(value);
+                        }
+                    });
+            }
+        });
 
     wv.setWebViewClient(new WebViewClient() {
         @Override
@@ -160,6 +192,7 @@ public class MainWidget {
   private static String getAssetPath(String path) {
       path = path.startsWith("/android_asset") ? path.substring("/android_asset".length()) : path;
       path = path.startsWith("/") ? path.substring(1) : path;
+      path = path.startsWith("index.html") ? "index.html" : path; // Get rid of in-page routes, e.g. index.html/parent
       return path;
   }
 
