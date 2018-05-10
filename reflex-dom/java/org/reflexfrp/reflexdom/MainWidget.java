@@ -31,13 +31,19 @@ import systems.obsidian.HaskellActivity;
 
 public class MainWidget {
   private static Object startMainWidget(final HaskellActivity a, String url, long jsaddleCallbacks, final String initialJS) {
-    class AndroidShare {
+      // Access Android features from Haskell via jsaddle:
+    class AndroidInterface {
       @JavascriptInterface
       public void share(String url) {
         Intent i = new Intent(Intent.ACTION_SEND, Uri.parse(url));
         i.putExtra(Intent.EXTRA_TEXT, url);
         i.setType("text/plain");
         a.startActivity(i);
+      }
+
+      @JavascriptInterface
+      public void killApp() {
+          a.finishAndRemoveTask();
       }
     }
 
@@ -55,12 +61,12 @@ public class MainWidget {
     ws.setAllowUniversalAccessFromFileURLs(true);
     ws.setDomStorageEnabled(true);
     wv.setWebContentsDebuggingEnabled(true);
-    wv.addJavascriptInterface(new AndroidShare(), "androidShare");
+    wv.addJavascriptInterface(new AndroidInterface(), "nativeHost");
     // allow video to play without user interaction
     wv.getSettings().setMediaPlaybackRequiresUserGesture(false);
 
     a.setBackEventListener(new HaskellActivity.BackEventListener() {
-            public void backButtonClicked(final ValueCallback<String> handled) {
+            public void backButtonClicked() {
                 // Does not work properly (page reloads or something ..)
                 // if (wv.canGoBack()) {
                 //     wv.goBack();
@@ -84,7 +90,8 @@ public class MainWidget {
                                         }
                                     });
                             }
-                            handled.onReceiveValue(value);
+                            else
+                                a.finishAndRemoveTask();
                         }
                     });
             }
