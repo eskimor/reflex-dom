@@ -28,6 +28,7 @@ import android.webkit.ValueCallback;
 import java.nio.charset.StandardCharsets;
 
 import systems.obsidian.HaskellActivity;
+import com.gonimo.baby.R;
 
 public class MainWidget {
   private static Object startMainWidget(final HaskellActivity a, String url, long jsaddleCallbacks, final String initialJS) {
@@ -38,7 +39,7 @@ public class MainWidget {
         Intent i = new Intent(Intent.ACTION_SEND, Uri.parse(url));
         i.putExtra(Intent.EXTRA_TEXT, url);
         i.setType("text/plain");
-        a.startActivity(i);
+        a.startActivity(Intent.createChooser(i, a.getString(R.string.share_using)));
       }
 
       @JavascriptInterface
