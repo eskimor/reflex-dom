@@ -46,6 +46,12 @@ public class MainWidget {
       public void killApp() {
           a.finishAndRemoveTask();
       }
+
+      @JavascriptInterface
+      // Show a warning to the user that Gonimo should be in the foreground.
+      public void requestStoppedWarning() {
+          a.showStoppedWarningNotification();
+      }
     }
 
     CookieManager.setAcceptFileSchemeCookies(true); //TODO: Can we do this just for our own WebView?
