@@ -29,7 +29,7 @@ type AttrMap = Map Text Text
 --   This is needed to guide the type inference with string literals are used
 --   with `OverloadedStrings` extension enabled.
 (=:) :: Text -> Text -> AttrMap
-(=:) k v =  Map.singleton k v
+(=:) = Map.singleton
 
 
 
