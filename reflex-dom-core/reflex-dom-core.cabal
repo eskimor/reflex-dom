@@ -41,7 +41,7 @@ flag profile-reflex
 library
   hs-source-dirs: src
   build-depends:
-    aeson >= 0.8 && < 1.3,
+    aeson >= 0.8 && < 1.4,
     base >= 4.7 && < 4.12,
     bifunctors >= 4.2 && < 6,
     bimap >= 0.3 && < 0.4,
@@ -120,7 +120,7 @@ library
     Reflex.Dom.Xhr.ResponseType
     Reflex.Dom.Xhr.Exception
 
-  ghc-options: -Wall -fwarn-tabs -funbox-strict-fields -O2 -ferror-spans -fspecialise-aggressively -ddump-simpl -ddump-to-file -dsuppress-coercions -dsuppress-idinfo
+  ghc-options: -Wall -fwarn-tabs -funbox-strict-fields -O2 -ferror-spans -fspecialise-aggressively
   ghc-prof-options: -fprof-auto
 
   if flag(expose-all-unfoldings)

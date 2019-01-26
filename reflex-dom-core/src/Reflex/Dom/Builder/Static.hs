@@ -40,14 +40,15 @@ import Data.Text (Text)
 import Data.Text.Encoding
 import Data.Tuple
 import GHC.Generics
+import Reflex.Adjustable.Class
 import Reflex.Class
+import Reflex.Dom.Main (DomHost, DomTimeline, runDomHost)
 import Reflex.Dom.Builder.Class
 import Reflex.Dynamic
 import Reflex.Host.Class
 import Reflex.PerformEvent.Base
 import Reflex.PerformEvent.Class
 import Reflex.PostBuild.Base
-import Reflex.Spider
 import Reflex.TriggerEvent.Class
 
 data StaticDomBuilderEnv t = StaticDomBuilderEnv
@@ -138,6 +139,7 @@ instance Default (StaticEventSpec er)
 
 instance DomSpace StaticDomSpace where
   type EventSpec StaticDomSpace = StaticEventSpec
+  type RawDocument StaticDomSpace = ()
   type RawTextNode StaticDomSpace = ()
   type RawElement StaticDomSpace = ()
   type RawFile StaticDomSpace = ()
@@ -145,6 +147,9 @@ instance DomSpace StaticDomSpace where
   type RawTextAreaElement StaticDomSpace = ()
   type RawSelectElement StaticDomSpace = ()
   addEventSpecFlags _ _ _ _ = StaticEventSpec
+
+instance (SupportsStaticDomBuilder t m, Monad m) => HasDocument (StaticDomBuilderT t m) where
+  askDocument = pure ()
 
 instance (Reflex t, Adjustable t m, MonadHold t m) => Adjustable t (StaticDomBuilderT t m) where
   runWithReplace a0 a' = do
@@ -283,12 +288,12 @@ instance SupportsStaticDomBuilder t m => DomBuilder t (StaticDomBuilderT t m) wh
   wrapRawElement () _ = return $ Element (EventSelector $ const never) ()
 
 --TODO: Make this more abstract --TODO: Put the WithWebView underneath PerformEventT - I think this would perform better
-type StaticWidget x = PostBuildT Spider (StaticDomBuilderT Spider (PerformEventT Spider (SpiderHost Global)))
+type StaticWidget x = PostBuildT DomTimeline (StaticDomBuilderT DomTimeline (PerformEventT DomTimeline DomHost))
 
 {-# INLINE renderStatic #-}
 renderStatic :: StaticWidget x a -> IO (a, ByteString)
 renderStatic w = do
-  runSpiderHost $ do
+  runDomHost $ do
     (postBuild, postBuildTriggerRef) <- newEventWithTriggerRef
     let env0 = StaticDomBuilderEnv True Nothing
     ((res, bs), FireCommand fire) <- hostPerformEventT $ runStaticDomBuilderT (runPostBuildT w postBuild) env0
