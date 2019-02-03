@@ -5,9 +5,13 @@
 , monad-control, mtl, primitive, ref-tf, reflex, semigroups, stdenv
 , stm, template-haskell, temporary, text, these, transformers
 , unix, zenc, hashable, chromium, process, jsaddle-warp
-, linux-namespaces, iproute, network-uri
+, linux-namespaces, iproute, network-uri, fontconfig
 }:
-let addGcTestDepends = drv: if stdenv.system != "x86_64-linux" then drv else drv // {
+let addGcTestDepends = drv: if (stdenv.system != "x86_64-linux" || stdenv.hostPlatform != stdenv.buildPlatform || (ghc.isGhcjs or false)) then drv else drv // {
+      # The headless browser run as part of gc tests would hang/crash without this
+      preCheck = ''
+        export FONTCONFIG_PATH=${fontconfig.out}/etc/fonts
+      '';
       testHaskellDepends = (drv.testHaskellDepends or []) ++ [ temporary jsaddle-warp process linux-namespaces ];
       testSystemDepends = (drv.testSystemDepends or []) ++ [ chromium iproute ];
     };

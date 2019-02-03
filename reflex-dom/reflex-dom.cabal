@@ -1,7 +1,10 @@
 Name: reflex-dom
 Version: 0.4
 Synopsis: Functional Reactive Web Apps with Reflex
-Description: Reflex-DOM is a Functional Reactive web framework based on the Reflex FRP engine
+Description:
+  Reflex-DOM is a Functional Reactive web framework based on the Reflex FRP engine.
+  .
+  For hackage documentation, please see: <https://hackage.haskell.org/package/reflex-dom-core>.
 License: BSD3
 License-file: LICENSE
 Author: Ryan Trinkle
@@ -10,12 +13,7 @@ Stability: Experimental
 Category: FRP, Web, GUI, HTML, Javascript, Reactive, Reactivity, User Interfaces, User-interface
 Build-type: Simple
 cabal-version: >=1.24
--- Deal with https://github.com/haskell/cabal/issues/2544 / https://github.com/haskell/cabal/issues/367
-extra-source-files: src/Reflex/Dom/Xhr/Foreign.hs
-                    src/Reflex/Dom/WebSocket/Foreign.hs
-                    src/Reflex/Dom/Xhr/ResponseType.hs
-                    src/Reflex/Dom/Xhr/Exception.hs
-                    java/org/reflexfrp/reflexdom/MainWidget.java
+extra-source-files: java/org/reflexfrp/reflexdom/MainWidget.java
 
 flag use-warp
   description: Use jsaddle-warp server
@@ -57,6 +55,7 @@ library
       jsaddle
     c-sources: cbits/MainWidget.c
     include-dirs: cbits/include
+    install-includes: MainWidget.h
     cpp-options: -DANDROID
     build-tools: hsc2hs
   build-depends:
@@ -116,6 +115,7 @@ library
     ghc-options: -fexpose-all-unfoldings
   if flag(use-reflex-optimizer)
     ghc-options: -fplugin=Reflex.Optimizer
+  default-language: Haskell2010
 
 executable sortableList
   build-depends: base
@@ -132,13 +132,13 @@ executable sortableList
   hs-source-dirs: examples
   main-is: sortableList.hs
   ghc-options: -Wall -fwarn-tabs -funbox-strict-fields -O2 -ferror-spans -fspecialise-aggressively
-  ghc-prof-options: -fprof-auto
   if !flag(build-examples)
     buildable: False
   if flag(expose-all-unfoldings)
     ghc-options: -fexpose-all-unfoldings
   if flag(use-reflex-optimizer)
     ghc-options: -fplugin=Reflex.Optimizer
+  default-language: Haskell2010
 
 executable benchmark
   build-depends: base, reflex, reflex-dom, text, prim-uniq, dependent-map, containers, transformers, mtl, ghcjs-dom, ghc-prim, random, dependent-sum
@@ -147,6 +147,7 @@ executable benchmark
   ghc-options: -O2 -fspecialise-aggressively
   if !impl(ghcjs)
     buildable: False
+  default-language: Haskell2010
 
 executable krausest
   build-depends: base, reflex, reflex-dom, text, prim-uniq, dependent-map, containers, transformers, mtl, ghcjs-dom, ghc-prim, random, dependent-sum, vector
@@ -154,11 +155,11 @@ executable krausest
   main-is: krausest.hs
   ghc-options: -O2 -fspecialise-aggressively
   if impl(ghcjs)
-    ghc-options: -dedupe
+    ghcjs-options: -dedupe
     cpp-options: -DGHCJS_BROWSER -DGHCJS_GC_INTERVAL=60000
   else
     buildable: False
-  type: exitcode-stdio-1.0
+  default-language: Haskell2010
 
 source-repository head
   type: git
