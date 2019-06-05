@@ -8,7 +8,6 @@ import android.util.Log;
 import android.view.ViewGroup.LayoutParams;
 import android.view.Window;
 import android.webkit.CookieManager;
-import android.webkit.JavascriptInterface;
 import android.webkit.MimeTypeMap;
 import android.webkit.PermissionRequest;
 import android.webkit.WebChromeClient;
@@ -24,36 +23,15 @@ import java.io.InputStream;
 import android.content.Intent;
 import android.content.ActivityNotFoundException;
 import android.webkit.ValueCallback;
+import android.webkit.JavascriptInterface;
 
 import java.nio.charset.StandardCharsets;
 
 import systems.obsidian.HaskellActivity;
-import com.gonimo.baby.R;
+import systems.obsidian.AndroidInterface;
 
 public class MainWidget {
   private static Object startMainWidget(final HaskellActivity a, String url, long jsaddleCallbacks, final String initialJS) {
-      // Access Android features from Haskell via jsaddle:
-    class AndroidInterface {
-      @JavascriptInterface
-      public void share(String url) {
-        Intent i = new Intent(Intent.ACTION_SEND, Uri.parse(url));
-        i.putExtra(Intent.EXTRA_TEXT, url);
-        i.setType("text/plain");
-        a.startActivity(Intent.createChooser(i, a.getString(R.string.share_using)));
-      }
-
-      @JavascriptInterface
-      public void killApp() {
-          a.finishAndRemoveTask();
-      }
-
-      @JavascriptInterface
-      // Show a warning to the user that Gonimo should be in the foreground.
-      public void requestStoppedWarning() {
-          a.showStoppedWarningNotification();
-      }
-    }
-
     CookieManager.setAcceptFileSchemeCookies(true); //TODO: Can we do this just for our own WebView?
 
     // Remove title and notification bars
@@ -68,7 +46,7 @@ public class MainWidget {
     ws.setAllowUniversalAccessFromFileURLs(true);
     ws.setDomStorageEnabled(true);
     wv.setWebContentsDebuggingEnabled(true);
-    wv.addJavascriptInterface(new AndroidInterface(), "nativeHost");
+    wv.addJavascriptInterface(new AndroidInterface(a), "nativeHost");
     // allow video to play without user interaction
     wv.getSettings().setMediaPlaybackRequiresUserGesture(false);
 
