@@ -141,7 +141,7 @@ import Data.Text (Text)
 import Foreign.JavaScript.Internal.Utils
 import Foreign.JavaScript.TH
 import GHCJS.DOM.Document (Document, createDocumentFragment, createElement, createElementNS, createTextNode, createComment)
-import GHCJS.DOM.Element (getScrollTop, removeAttribute, removeAttributeNS, setAttribute, setAttributeNS, hasAttribute, hasAttributeNS)
+import GHCJS.DOM.Element (getScrollTop, removeAttribute, removeAttributeNS, setAttribute, setAttributeNS, hasAttribute)
 import GHCJS.DOM.EventM (EventM, event, on)
 import GHCJS.DOM.KeyboardEvent as KeyboardEvent
 import GHCJS.DOM.MouseEvent
@@ -318,8 +318,7 @@ addHydrationStepWithSetup :: (Adjustable t m, MonadIO m) => m a -> (a -> Hydrati
 addHydrationStepWithSetup setup f = getHydrationMode >>= \case
   HydrationMode_Immediate -> pure ()
   HydrationMode_Hydrating -> do
-    switchover <- HydrationDomBuilderT $ asks _hydrationDomBuilderEnv_switchover
-    (s, _) <- lift $ runWithReplace setup $ return () <$ switchover
+    s <- lift setup
     addHydrationStep (f s)
 
 -- | Add a hydration step
@@ -347,7 +346,7 @@ runDomRenderHookT (DomRenderHookT a) events = do
   flip runTriggerEventT events $ do
     rec (result, req) <- runRequesterT a rsp
         rsp <- performEventAsync $ ffor req $ \rm f -> liftJSM $ runInAnimationFrame f $
-          traverseRequesterData (\r -> Identity <$> r) rm
+          traverseRequesterData (fmap Identity) rm
     return result
   where
     runInAnimationFrame f x = void . DOM.inAnimationFrame' $ \_ -> do
@@ -362,7 +361,7 @@ instance (Reflex t, MonadFix m) => DomRenderHook t (DomRenderHookT t m) where
   withRenderHook hook (DomRenderHookT a) = do
     DomRenderHookT $ withRequesting $ \rsp -> do
       (x, req) <- lift $ runRequesterT a $ runIdentity <$> rsp
-      return (ffor req $ \rm -> hook $ traverseRequesterData (\r -> Identity <$> r) rm, x)
+      return (ffor req $ \rm -> hook $ traverseRequesterData (fmap Identity) rm, x)
   requestDomAction = DomRenderHookT . requestingIdentity
   requestDomAction_ = DomRenderHookT . requesting_
 
@@ -764,11 +763,13 @@ hydrateElement elementTag cfg child = do
         }
   result <- HydrationDomBuilderT $ lift $ runReaderT (unHydrationDomBuilderT child) env'
   wrapResult <- liftIO newEmptyMVar
-  let ssrAttr = "data-ssr" :: DOM.JSString
-      hasSSRAttribute :: DOM.Element -> HydrationRunnerT t m Bool
-      hasSSRAttribute e = case cfg ^. namespace of
-        Nothing -> hasAttribute e ssrAttr <* removeAttribute e ssrAttr
-        Just ns -> hasAttributeNS e (Just ns) ssrAttr <* removeAttributeNS e (Just ns) ssrAttr
+  let skipAttr = "data-hydration-skip" :: DOM.JSString
+      ssrAttr = "data-ssr" :: DOM.JSString
+      shouldSkip :: DOM.Element -> HydrationRunnerT t m Bool
+      shouldSkip e = do
+        skip <- hasAttribute e skipAttr
+        ssr <- hasAttribute e ssrAttr
+        pure $ skip || not ssr
   childDom <- liftIO $ readIORef childDelayedRef
   let rawCfg = extractRawElementConfig cfg
   doc <- askDocument
@@ -783,9 +784,9 @@ hydrateElement elementTag cfg child = do
             pure e
           Just node -> DOM.castTo DOM.Element node >>= \case
             Nothing -> go (Just node) -- this node is not an element, skip
-            Just e -> hasSSRAttribute e >>= \case
-              False -> go (Just node) -- this element was not added by the static renderer, skip
-              True -> do
+            Just e -> shouldSkip e >>= \case
+              True -> go (Just node) -- this element is explicitly marked for being skipped by hydration
+              False -> do
                 t <- Element.getTagName e
                 -- TODO: check attributes?
                 if T.toCaseFold elementTag == T.toCaseFold t
@@ -1270,8 +1271,8 @@ hydrateComment doc t mSetContents = do
 skipToAndReplaceComment
   :: (MonadJSM m, Reflex t, MonadFix m, Adjustable t m, MonadHold t m, RawDocument (DomBuilderSpace (HydrationDomBuilderT s t m)) ~ Document)
   => Text
-  -> IORef Text
-  -> HydrationDomBuilderT s t m (HydrationRunnerT t m (), IORef DOM.Text, IORef Text)
+  -> IORef (Maybe Text)
+  -> HydrationDomBuilderT s t m (HydrationRunnerT t m (), IORef DOM.Text, IORef (Maybe Text))
 skipToAndReplaceComment prefix key0Ref = getHydrationMode >>= \case
   HydrationMode_Immediate -> do
     -- If we're in immediate mode, we don't try to replace an existing comment,
@@ -1279,43 +1280,50 @@ skipToAndReplaceComment prefix key0Ref = getHydrationMode >>= \case
     t <- textNodeImmediate $ TextNodeConfig ("" :: Text) Nothing
     append $ toNode t
     textNodeRef <- liftIO $ newIORef t
-    keyRef <- liftIO $ newIORef ""
+    keyRef <- liftIO $ newIORef Nothing
     pure (pure (), textNodeRef, keyRef)
   HydrationMode_Hydrating -> do
     doc <- askDocument
     textNodeRef <- liftIO $ newIORef $ error "textNodeRef not yet initialized"
     keyRef <- liftIO $ newIORef $ error "keyRef not yet initialized"
-    let go key0 mLastNode = do
-          parent <- askParent
-          node <- maybe (Node.getFirstChildUnchecked parent) Node.getNextSiblingUnchecked mLastNode
-          DOM.castTo DOM.Comment node >>= \case
+    let
+      go Nothing _ = do
+        tn <- createTextNode doc ("" :: Text)
+        insertAfterPreviousNode tn
+        HydrationRunnerT $ modify' $ \s -> s { _hydrationState_failed = True }
+        pure (tn, Nothing)
+      go (Just key0) mLastNode = do
+        parent <- askParent
+        maybe (Node.getFirstChild parent) Node.getNextSibling mLastNode >>= \case
+          Nothing -> go Nothing Nothing
+          Just node -> DOM.castTo DOM.Comment node >>= \case
             Just comment -> do
-              commentText <- Node.getTextContentUnchecked comment
-              case T.stripPrefix (prefix <> key0) commentText of
+              commentText <- fromMaybe (error "Cannot get text content of comment node") <$> Node.getTextContent comment
+              case T.stripPrefix (prefix <> key0) commentText of -- 'key0' may be @""@ in which case we're just finding the actual key; TODO: Don't be clever.
                 Just key -> do
                   -- Replace the comment with an (invisible) text node
                   tn <- createTextNode doc ("" :: Text)
                   Node.replaceChild_ parent tn comment
-                  pure (tn, key)
+                  pure (tn, Just key)
                 Nothing -> do
-                  go key0 (Just node)
+                  go (Just key0) (Just node)
             Nothing -> do
-              go key0 (Just node)
-        switchComment = do
-          key0 <- liftIO $ readIORef key0Ref
-          (tn, key) <- go key0 =<< getPreviousNode
-          setPreviousNode $ Just $ toNode tn
-          liftIO $ do
-            writeIORef textNodeRef tn
-            writeIORef keyRef key
+              go (Just key0) (Just node)
+      switchComment = do
+        key0 <- liftIO $ readIORef key0Ref
+        (tn, key) <- go key0 =<< getPreviousNode
+        setPreviousNode $ Just $ toNode tn
+        liftIO $ do
+          writeIORef textNodeRef tn
+          writeIORef keyRef key
     pure (switchComment, textNodeRef, keyRef)
 
 {-# INLINABLE skipToReplaceStart #-}
-skipToReplaceStart :: (MonadJSM m, Reflex t, MonadFix m, Adjustable t m, MonadHold t m, RawDocument (DomBuilderSpace (HydrationDomBuilderT s t m)) ~ Document) => HydrationDomBuilderT s t m (HydrationRunnerT t m (), IORef DOM.Text, IORef Text)
-skipToReplaceStart = skipToAndReplaceComment "replace-start" =<< liftIO (newIORef "")
+skipToReplaceStart :: (MonadJSM m, Reflex t, MonadFix m, Adjustable t m, MonadHold t m, RawDocument (DomBuilderSpace (HydrationDomBuilderT s t m)) ~ Document) => HydrationDomBuilderT s t m (HydrationRunnerT t m (), IORef DOM.Text, IORef (Maybe Text))
+skipToReplaceStart = skipToAndReplaceComment "replace-start" =<< liftIO (newIORef $ Just "") -- TODO: Don't rely on clever usage @""@ to make this work.
 
 {-# INLINABLE skipToReplaceEnd #-}
-skipToReplaceEnd :: (MonadJSM m, Reflex t, MonadFix m, Adjustable t m, MonadHold t m, RawDocument (DomBuilderSpace (HydrationDomBuilderT s t m)) ~ Document) => IORef Text -> HydrationDomBuilderT s t m (HydrationRunnerT t m (), IORef DOM.Text)
+skipToReplaceEnd :: (MonadJSM m, Reflex t, MonadFix m, Adjustable t m, MonadHold t m, RawDocument (DomBuilderSpace (HydrationDomBuilderT s t m)) ~ Document) => IORef (Maybe Text) -> HydrationDomBuilderT s t m (HydrationRunnerT t m (), IORef DOM.Text)
 skipToReplaceEnd key = fmap (\(m,e,_) -> (m,e)) $ skipToAndReplaceComment "replace-end" key
 
 instance SupportsHydrationDomBuilder t m => NotReady t (HydrationDomBuilderT s t m) where
@@ -1555,13 +1563,13 @@ instance (Adjustable t m, MonadJSM m, MonadHold t m, MonadFix m, PrimMonad m, Ra
                   readIORef (_traverseChildImmediate_childReadyState immediate) >>= \case
                     ChildReadyState_Ready -> return PatchDMapWithMove.From_Delete
                     ChildReadyState_Unready _ -> do
-                      writeIORef (_traverseChildImmediate_childReadyState immediate) $ ChildReadyState_Unready $ Just $ This k
+                      writeIORef (_traverseChildImmediate_childReadyState immediate) $ ChildReadyState_Unready $ Just $ Some k
                       return $ PatchDMapWithMove.From_Insert $ Constant (_traverseChildImmediate_childReadyState immediate)
                 PatchDMapWithMove.From_Delete -> return PatchDMapWithMove.From_Delete
                 PatchDMapWithMove.From_Move fromKey -> return $ PatchDMapWithMove.From_Move fromKey
               deleteOrMove :: forall a. k a -> Product (Constant (IORef (ChildReadyState (Some k)))) (ComposeMaybe k) a -> IO (Constant () a)
               deleteOrMove _ (Pair (Constant sRef) (ComposeMaybe mToKey)) = do
-                writeIORef sRef $ ChildReadyState_Unready $ This <$> mToKey -- This will be Nothing if deleting, and Just if moving, so it works out in both cases
+                writeIORef sRef $ ChildReadyState_Unready $ Some <$> mToKey -- This will be Nothing if deleting, and Just if moving, so it works out in both cases
                 return $ Constant ()
           p' <- fmap unsafePatchDMapWithMove $ DMap.traverseWithKey new $ unPatchDMapWithMove p
           _ <- DMap.traverseWithKey deleteOrMove $ PatchDMapWithMove.getDeletionsAndMoves p old
@@ -1571,8 +1579,8 @@ instance (Adjustable t m, MonadJSM m, MonadHold t m, MonadFix m, PrimMonad m, Ra
       phsBefore <- liftIO $ readIORef placeholders
       let collectIfMoved :: forall a. k a -> PatchDMapWithMove.NodeInfo k (Compose (TraverseChild t m (Some k)) v') a -> JSM (Constant (Maybe DOM.DocumentFragment) a)
           collectIfMoved k e = do
-            let mThisPlaceholder = Map.lookup (This k) phsBefore -- Will be Nothing if this element wasn't present before
-                nextPlaceholder = maybe lastPlaceholder snd $ Map.lookupGT (This k) phsBefore
+            let mThisPlaceholder = Map.lookup (Some k) phsBefore -- Will be Nothing if this element wasn't present before
+                nextPlaceholder = maybe lastPlaceholder snd $ Map.lookupGT (Some k) phsBefore
             case isJust $ getComposeMaybe $ PatchDMapWithMove._nodeInfo_to e of
               False -> do
                 mapM_ (`deleteUpTo` nextPlaceholder) mThisPlaceholder
@@ -1591,7 +1599,7 @@ instance (Adjustable t m, MonadJSM m, MonadHold t m, MonadFix m, PrimMonad m, Ra
             PatchMapWithMove.From_Move k -> Just $ PatchMapWithMove.From_Move k
       let placeFragment :: forall a. k a -> PatchDMapWithMove.NodeInfo k (Compose (TraverseChild t m (Some k)) v') a -> JSM (Constant () a)
           placeFragment k e = do
-            let nextPlaceholder = maybe lastPlaceholder snd $ Map.lookupGT (This k) phsAfter
+            let nextPlaceholder = maybe lastPlaceholder snd $ Map.lookupGT (Some k) phsAfter
             case PatchDMapWithMove._nodeInfo_from e of
               PatchDMapWithMove.From_Insert (Compose (TraverseChild x _)) -> case x of
                 Left _ -> pure ()
@@ -1622,7 +1630,7 @@ traverseDMapWithKeyWithAdjust' = do
                 readIORef (_traverseChildImmediate_childReadyState immediate) >>= \case
                   ChildReadyState_Ready -> return Nothing -- Delete this child, since it's ready
                   ChildReadyState_Unready _ -> do
-                    writeIORef (_traverseChildImmediate_childReadyState immediate) $ ChildReadyState_Unready $ Just $ This k
+                    writeIORef (_traverseChildImmediate_childReadyState immediate) $ ChildReadyState_Unready $ Just $ Some k
                     return $ Just $ Constant (_traverseChildImmediate_childReadyState immediate)
             delete _ (Constant sRef) = do
               writeIORef sRef $ ChildReadyState_Unready Nothing
@@ -1633,9 +1641,9 @@ traverseDMapWithKeyWithAdjust' = do
   hoistTraverseWithKeyWithAdjust traverseDMapWithKeyWithAdjust mapPatchDMap updateChildUnreadiness $ \placeholders lastPlaceholder (PatchDMap patch) -> do
     phs <- liftIO $ readIORef placeholders
     forM_ (DMap.toList patch) $ \(k :=> ComposeMaybe mv) -> do
-      let nextPlaceholder = maybe lastPlaceholder snd $ Map.lookupGT (This k) phs
+      let nextPlaceholder = maybe lastPlaceholder snd $ Map.lookupGT (Some k) phs
       -- Delete old node
-      forM_ (Map.lookup (This k) phs) $ \thisPlaceholder -> do
+      forM_ (Map.lookup (Some k) phs) $ \thisPlaceholder -> do
         thisPlaceholder `deleteUpTo` nextPlaceholder
       -- Insert new node
       forM_ mv $ \(Compose (TraverseChild e _)) -> case e of
@@ -1785,7 +1793,7 @@ hoistTraverseWithKeyWithAdjust base mapPatch updateChildUnreadiness applyDomUpda
             liftIO $ writeIORef childReadyState ChildReadyState_Ready
             case countedAt of
               Nothing -> return ()
-              Just (This k) -> do -- This child has been counted as unready, so we need to remove it from the unready set
+              Just (Some k) -> do -- This child has been counted as unready, so we need to remove it from the unready set
                 (oldUnready, p) <- liftIO $ readIORef pendingChange
                 when (not $ DMap.null oldUnready) $ do -- This shouldn't actually ever be null
                   let newUnready = DMap.delete k oldUnready
@@ -1800,7 +1808,7 @@ hoistTraverseWithKeyWithAdjust base mapPatch updateChildUnreadiness applyDomUpda
           readIORef (_traverseChildImmediate_childReadyState immediate) >>= \case
             ChildReadyState_Ready -> return Nothing
             ChildReadyState_Unready _ -> do
-              writeIORef (_traverseChildImmediate_childReadyState immediate) $ ChildReadyState_Unready $ Just $ This k
+              writeIORef (_traverseChildImmediate_childReadyState immediate) $ ChildReadyState_Unready $ Just $ Some k
               return $ Just $ Constant (_traverseChildImmediate_childReadyState immediate)
   initialUnready <- liftIO $ DMap.mapMaybeWithKey (\_ -> getComposeMaybe) <$> DMap.traverseWithKey processChild children0
   liftIO $ if DMap.null initialUnready

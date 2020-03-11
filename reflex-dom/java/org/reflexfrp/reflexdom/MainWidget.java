@@ -8,6 +8,8 @@ import android.util.Log;
 import android.view.ViewGroup.LayoutParams;
 import android.view.Window;
 import android.webkit.CookieManager;
+import android.webkit.GeolocationPermissions;
+import android.webkit.JavascriptInterface;
 import android.webkit.MimeTypeMap;
 import android.webkit.PermissionRequest;
 import android.webkit.WebChromeClient;
@@ -24,6 +26,7 @@ import android.content.Intent;
 import android.content.ActivityNotFoundException;
 import android.webkit.ValueCallback;
 import android.webkit.JavascriptInterface;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 import java.nio.charset.StandardCharsets;
 
@@ -49,6 +52,7 @@ public class MainWidget {
     wv.addJavascriptInterface(new AndroidInterface(a), "nativeHost");
     // allow video to play without user interaction
     wv.getSettings().setMediaPlaybackRequiresUserGesture(false);
+    final AtomicBoolean jsaddleLoaded = new AtomicBoolean(false);
 
     a.setBackEventListener(new HaskellActivity.BackEventListener() {
             public void backButtonClicked() {
@@ -85,7 +89,12 @@ public class MainWidget {
     wv.setWebViewClient(new WebViewClient() {
         @Override
         public void onPageFinished(WebView _view, String _url) {
-          wv.evaluateJavascript(initialJS, null);
+          Log.i("reflex", "onPageFinished");
+          boolean alreadyLoaded = jsaddleLoaded.getAndSet(true);
+          if(!alreadyLoaded) {
+            Log.i("reflex", "loading jsaddle");
+            wv.evaluateJavascript(initialJS, null);
+          }
         }
 
         // Re-route / to /android_asset
@@ -150,6 +159,11 @@ public class MainWidget {
         @Override
         public Bitmap getDefaultVideoPoster() {
             return Bitmap.createBitmap(10, 10, Bitmap.Config.ARGB_8888);
+        }
+
+        @Override
+        public void onGeolocationPermissionsShowPrompt(String origin, GeolocationPermissions.Callback callback) {
+            callback.invoke(origin, true, false);
         }
     });
 

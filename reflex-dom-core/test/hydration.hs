@@ -1,12 +1,9 @@
-{-# OPTIONS_GHC -fno-warn-orphans #-}
 {-# LANGUAGE BangPatterns #-}
-{-# LANGUAGE StandaloneDeriving #-}
-{-# LANGUAGE GeneralizedNewtypeDeriving #-}
-{-# LANGUAGE UndecidableInstances #-}
 {-# LANGUAGE ConstraintKinds #-}
-{-# LANGUAGE CPP #-}
 {-# LANGUAGE FlexibleContexts #-}
+{-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE GADTs #-}
+{-# LANGUAGE GeneralizedNewtypeDeriving #-}
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE MultiParamTypeClasses #-}
 {-# LANGUAGE OverloadedStrings #-}
@@ -14,28 +11,35 @@
 {-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE RecursiveDo #-}
 {-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE StandaloneDeriving #-}
 {-# LANGUAGE TemplateHaskell #-}
 {-# LANGUAGE TupleSections #-}
 {-# LANGUAGE TypeApplications #-}
 {-# LANGUAGE TypeFamilies #-}
+{-# LANGUAGE UndecidableInstances #-}
 
+{-# OPTIONS_GHC -fno-warn-orphans #-}
+
+import Prelude hiding (fail)
 import Control.Concurrent
-import Control.Monad
+import qualified Control.Concurrent.Async as Async
+import Control.Lens.Operators
+import Control.Monad hiding (fail)
 import Control.Monad.Catch
+import Control.Monad.Fail
 import Control.Monad.Fix
 import Control.Monad.IO.Class
 import Control.Monad.Ref
 import Data.Constraint.Extras
 import Data.Constraint.Extras.TH
 import Data.Dependent.Map (DMap)
-import Data.Dependent.Sum (DSum(..), (==>), EqTag(..), ShowTag(..))
+import Data.Dependent.Sum (DSum(..), (==>))
 import Data.Functor.Identity
 import Data.Functor.Misc
 import Data.GADT.Compare.TH
 import Data.GADT.Show.TH
 import Data.IORef (IORef)
 import Data.Maybe
-import Data.Monoid
 import Data.Proxy
 import Data.Text (Text)
 import Language.Javascript.JSaddle (syncPoint, liftJSM)
@@ -52,8 +56,10 @@ import System.IO (stderr)
 import System.IO.Silently
 import System.IO.Temp
 import System.Process
+import System.Which (staticWhich)
 import qualified Test.HUnit as HUnit (assertEqual, assertFailure)
 import qualified Test.Hspec as H
+import qualified Test.Hspec.Core.Spec as H
 import Test.Hspec (xit)
 import Test.Hspec.WebDriver hiding (runWD, click, uploadFile, WD)
 import qualified Test.Hspec.WebDriver as WD
@@ -72,6 +78,12 @@ import qualified Test.WebDriver.Capabilities as WD
 
 import Test.Util.ChromeFlags
 import Test.Util.UnshareNetwork
+
+-- ORPHAN: https://github.com/kallisti-dev/hs-webdriver/pull/167
+deriving instance MonadMask WD
+
+chromium :: FilePath
+chromium = $(staticWhich "chromium")
 
 seleniumPort, jsaddlePort :: PortNumber
 seleniumPort = 8000
@@ -116,16 +128,7 @@ deriveGEq ''DKey
 deriveGCompare ''DKey
 deriveGShow ''DKey
 
-instance ShowTag DKey Identity where
-  showTaggedPrec = \case
-    Key_Int -> showsPrec
-    Key_Char -> showsPrec
-    Key_Bool -> showsPrec
-
-instance EqTag DKey Identity where
-  eqTagged Key_Int Key_Int = (==)
-  eqTagged Key_Char Key_Char = (==)
-  eqTagged Key_Bool Key_Bool = (==)
+deriving instance MonadFail WD
 
 main :: IO ()
 main = do
@@ -133,9 +136,9 @@ main = do
   isHeadless <- (== Nothing) <$> lookupEnv "NO_HEADLESS"
   withSandboxedChromeFlags isHeadless $ \chromeFlags -> do
     withSeleniumServer $ \selenium -> do
-      browserPath <- liftIO $ T.strip . T.pack <$> readProcess "which" [ "chromium" ] ""
+      let browserPath = T.strip $ T.pack chromium
       when (T.null browserPath) $ fail "No browser found"
-      withDebugging <- isJust <$> lookupEnv "DEBUG"
+      withDebugging <- isNothing <$> lookupEnv "NO_DEBUG"
       let wdConfig = WD.defaultConfig { WD.wdPort = fromIntegral $ _selenium_portNumber selenium }
           chromeCaps' = WD.getCaps $ chromeConfig browserPath chromeFlags
       hspec (tests withDebugging wdConfig [chromeCaps'] selenium) `finally` _selenium_stopServer selenium
@@ -280,13 +283,6 @@ tests withDebugging wdConfig caps _selenium = do
         (e, ()) <- element "div" conf $ text "hello world"
         let click = domEvent Click e
         return ()
-    -- TODO check this is the correct solution
-    it "has ssr attribute, removes ssr attribute" $ runWD $ do
-      let checkSSRAttr = do
-            e <- findElemWithRetry $ WD.ByTag "div"
-            assertAttr e "data-ssr" (Just "")
-            pure e
-      testWidget' checkSSRAttr (\e -> assertAttr e "data-ssr" Nothing) $ el "div" $ text "hello world"
 
   describe "inputElement" $ do
     describe "hydration" $ session' $ do
@@ -754,9 +750,9 @@ tests withDebugging wdConfig caps _selenium = do
           pb <- getPostBuild
           performEvent_ $ liftIO (putMVar lock ()) <$ pb
     it "result Dynamic is updated *after* switchover" $ runWD $ do
-      let static = checkBodyText "PostBuild"
+      let preSwitchover = checkBodyText "PostBuild"
           check = checkBodyText "Client"
-      testWidget static check $ void $ do
+      testWidget preSwitchover check $ void $ do
         d <- prerender (pure "Initial") (pure "Client")
         pb <- getPostBuild
         initial <- sample $ current d
@@ -764,19 +760,28 @@ tests withDebugging wdConfig caps _selenium = do
     -- This essentially checks that the client IO runs *after* switchover/postBuild,
     -- thus can't create conflicting DOM
     it "can't exploit IO to break hydration" $ runWD $ do
-      let static = checkBodyText "Initial"
-      testWidgetStatic static $ void $ do
+      let preSwitchover = checkBodyText "Initial"
+      testWidgetStatic preSwitchover $ void $ do
         ref <- liftIO $ newRef "Initial"
         prerender_ (pure ()) (liftIO $ writeRef ref "Client")
         text <=< liftIO $ readRef ref
     -- As above, so below
     it "can't exploit triggerEvent to break hydration" $ runWD $ do
-      let static = checkBodyText "Initial"
+      let preSwitchover = checkBodyText "Initial"
           check = checkBodyText "Client"
-      testWidget static check $ void $ do
+      testWidget preSwitchover check $ void $ do
         (e, trigger) <- newTriggerEvent
         prerender_ (pure ()) (liftIO $ trigger "Client")
         textNode $ TextNodeConfig "Initial" $ Just e
+
+  describe "namespaces" $ session' $ do
+    it "dyn can be nested in namespaced widget" $ runWD $ do
+      testWidget (pure ()) (checkTextInTag "svg" "one") $ do
+        let svgRootCfg = def
+              & (elementConfig_namespace ?~ "http://www.w3.org/2000/svg")
+              & (elementConfig_initialAttributes .~ ("width" =: "100%" <> "height" =: "100%" <> "viewBox" =: "0 0 1536 2048"))
+        void $ element "svg" svgRootCfg $ do
+          dyn_ $ text "one" <$ pure ()
 
   describe "runWithReplace" $ session' $ do
     it "works" $ runWD $ do
@@ -812,7 +817,7 @@ tests withDebugging wdConfig caps _selenium = do
           , el "span" . text <$> replace
           ]
     it "can be nested in postBuild widget" $ runWD $ do
-      replaceChan <- liftIO newChan
+      replaceChan :: Chan Text <- liftIO newChan
       let setup = findElemWithRetry $ WD.ByTag "div"
           check ssr = do
             -- Check that the original element still exists and has the correct text
@@ -922,6 +927,58 @@ tests withDebugging wdConfig caps _selenium = do
             , el "span" . text <$> replace
             ]
 
+    let checkInnerHtml t x = findElemWithRetry (WD.ByTag t) >>= (`attr` "innerHTML") >>= (`shouldBe` Just x)
+    it "removes bracketing comments" $ runWD $ do
+      replaceChan :: Chan () <- liftIO newChan
+      let
+        preSwitchover = checkInnerHtml "div" "before|<!--replace-start-0-->inner1<!--replace-end-0-->|after"
+        check () = do
+          liftIO $ writeChan replaceChan () -- trigger creation of p tag
+          _ <- findElemWithRetry $ WD.ByTag "p" -- wait till p tag is created
+          checkInnerHtml "div" "before|<p>inner2</p>|after"
+      testWidget' preSwitchover check $ do
+        replace <- triggerEventWithChan replaceChan
+        el "div" $ do
+          text "before|"
+          _ <- runWithReplace (text "inner1") $ el "p" (text "inner2") <$ replace
+          text "|after"
+    it "ignores extra ending bracketing comment" $ runWD $ do
+      replaceChan :: Chan () <- liftIO newChan
+      let
+        preSwitchover = checkInnerHtml "div" "before|<!--replace-start-0-->inner1<!--replace-end-0--><!--replace-end-0-->|after"
+        check () = do
+          liftIO $ writeChan replaceChan () -- trigger creation of p tag
+          _ <- findElemWithRetry $ WD.ByTag "p" -- wait till p tag is created
+          checkInnerHtml "div" "before|inner2|after"
+      testWidget' preSwitchover check $ do
+        replace <- triggerEventWithChan replaceChan
+        el "div" $ do
+          text "before|"
+          _ <- runWithReplace (text "inner1" *> comment "replace-end-0") $ text "inner2" <$ replace
+          text "|after"
+        void $ runWithReplace blank $ el "p" blank <$ replace -- Signal tag for end of test
+    it "ignores missing ending bracketing comments" $ runWD $ do
+      replaceChan :: Chan () <- liftIO newChan
+      let
+        preSwitchover = do
+          checkInnerHtml "div" "before|<!--replace-start-0-->inner1<!--replace-end-0-->|after"
+          divEl <- findElemWithRetry (WD.ByTag "div")
+          let wrongHtml = "<!--replace-start-0-->inner1"
+          actualHtml :: String <- WD.executeJS
+            [WD.JSArg divEl, WD.JSArg wrongHtml]
+            "arguments[0].innerHTML = arguments[1]; return arguments[0].innerHTML"
+          actualHtml `shouldBe` wrongHtml
+        check () = do
+          liftIO $ writeChan replaceChan () -- trigger creation of p tag
+          _ <- findElemWithRetry $ WD.ByTag "p" -- wait till p tag is created
+          checkInnerHtml "div" "before|<p>inner2</p>|after"
+      testWidget' preSwitchover check $ do
+        replace <- triggerEventWithChan replaceChan
+        el "div" $ do
+          text "before|"
+          _ <- runWithReplace (text "inner1") $ el "p" (text "inner2") <$ replace
+          text "|after"
+
   describe "traverseDMapWithKeyWithAdjust" $ session' $ do
     let widget :: DomBuilder t m => DKey a -> Identity a -> m (Identity a)
         widget k (Identity v) = elAttr "li" ("id" =: textKey k) $ do
@@ -962,26 +1019,26 @@ tests withDebugging wdConfig caps _selenium = do
         postBuildPatch = PatchDMap $ DMap.fromList [Key_Char :=> ComposeMaybe Nothing, Key_Bool :=> ComposeMaybe (Just $ Identity True)]
     it "doesn't replace elements at switchover, can delete/update/insert" $ runWD $ do
       chan <- liftIO newChan
-      let static :: WD [WD.Element]
-          static = getAndCheckInitialItems keyMap
+      let preSwitchover :: WD [WD.Element]
+          preSwitchover = getAndCheckInitialItems keyMap
           check :: [WD.Element] -> WD ()
           check xs = do
             checkInitialItems keyMap xs
             checkRemoval chan Key_Int
             checkReplace chan Key_Char 'B'
             checkInsert chan Key_Bool True
-      testWidget' static check $ do
+      testWidget' preSwitchover check $ do
         (dmap, _evt) <- traverseDMapWithKeyWithAdjust widget keyMap =<< triggerEventWithChan chan
         liftIO $ dmap `H.shouldBe` keyMap
     it "handles postBuild correctly" $ runWD $ do
       chan <- liftIO newChan
-      let static = getAndCheckInitialItems $ applyAlways postBuildPatch keyMap
+      let preSwitchover = getAndCheckInitialItems $ applyAlways postBuildPatch keyMap
           check xs = do
             withRetry $ checkInitialItems (applyAlways postBuildPatch keyMap) xs
             checkRemoval chan Key_Int
             checkInsert chan Key_Char 'B'
             checkReplace chan Key_Bool True
-      testWidget' static check $ void $ do
+      testWidget' preSwitchover check $ void $ do
         pb <- getPostBuild
         replace <- triggerEventWithChan chan
         (dmap, _evt) <- traverseDMapWithKeyWithAdjust widget keyMap $ leftmost [postBuildPatch <$ pb, replace]
@@ -1071,24 +1128,24 @@ tests withDebugging wdConfig caps _selenium = do
         postBuildPatch = PatchIntMap $ IntMap.fromList [(2, Nothing), (3, Just "trois"), (4, Just "four")]
     xit "doesn't replace elements at switchover, can delete/update/insert" $ runWD $ do
       chan <- liftIO newChan
-      let static = getAndCheckInitialItems intMap
+      let preSwitchover = getAndCheckInitialItems intMap
           check xs = do
             checkInitialItems intMap xs
             checkRemoval chan 1
             checkReplace chan 2 "deux"
             checkInsert chan 4 "four"
-      testWidget' static check $ void $ do
+      testWidget' preSwitchover check $ void $ do
         (im, _evt) <- traverseIntMapWithKeyWithAdjust widget intMap =<< triggerEventWithChan chan
         liftIO $ im `H.shouldBe` intMap
     xit "handles postBuild correctly" $ runWD $ do
       chan <- liftIO newChan
-      let static = getAndCheckInitialItems $ applyAlways postBuildPatch intMap
+      let preSwitchover = getAndCheckInitialItems $ applyAlways postBuildPatch intMap
           check xs = do
             withRetry $ checkInitialItems (applyAlways postBuildPatch intMap) xs
             checkRemoval chan 1
             checkInsert chan 2 "deux"
             checkReplace chan 3 "trois"
-      testWidget' static check $ void $ do
+      testWidget' preSwitchover check $ void $ do
         pb <- getPostBuild
         replace <- triggerEventWithChan chan
         (dmap, _evt) <- traverseIntMapWithKeyWithAdjust widget intMap $ leftmost [postBuildPatch <$ pb, replace]
@@ -1153,6 +1210,9 @@ tests withDebugging wdConfig caps _selenium = do
           xs <- WD.findElems (WD.ByTag "li")
           checkInitialItems dm xs
           pure xs
+        moveSpec
+          :: (DMap Key2 Identity -> (WD.Element -> Chan (PatchDMapWithMove Key2 Identity) -> WD ()) -> WD ())
+          -> H.SpecM (WdTestSession ()) ()
         moveSpec testMove = do
           it "can insert an item" $ runWD $ testMove (DMap.fromList [Key2_Int 1 ==> 1, Key2_Int 3 ==> 3]) $ \body chan -> do
             shouldContainText (T.strip $ T.unlines ["i11","i33"]) body
@@ -1180,19 +1240,19 @@ tests withDebugging wdConfig caps _selenium = do
 
     describe "hydration" $ moveSpec $ \initMap test -> do
       chan <- liftIO newChan
-      let static = getAndCheckInitialItems initMap
+      let preSwitchover = getAndCheckInitialItems initMap
           check xs = do
             checkInitialItems initMap xs
             body <- getBody
             test body chan
-      testWidget' static check $ void $ do
+      testWidget' preSwitchover check $ void $ do
         (dmap, _evt) <- traverseDMapWithKeyWithAdjustWithMove widget initMap =<< triggerEventWithChan chan
         liftIO $ assertEqual "DMap" initMap dmap
 
     describe "hydration/immediate" $ moveSpec $ \initMap test -> do
       chan <- liftIO newChan
       replace <- liftIO newChan
-      lock <- liftIO newEmptyMVar
+      lock :: MVar () <- liftIO newEmptyMVar
       let check = do
             liftIO $ do
               writeChan replace ()
@@ -1211,10 +1271,12 @@ tests withDebugging wdConfig caps _selenium = do
 
   describe "hydrating invalid HTML" $ session' $ do
     it "can hydrate list in paragraph" $ runWD $ do
-      let static = do
+      let preSwitchover = do
             checkBodyText "before\ninner\nafter"
             -- Two <p> tags should be present
-            [p1, p2] <- WD.findElems (WD.ByTag "p")
+            (p1, p2) <- WD.findElems (WD.ByTag "p") >>= \case
+              [p1, p2] -> pure (p1, p2)
+              _ -> error "Unexpected number of `p` tags (expected 2)"
             ol <- findElemWithRetry (WD.ByTag "ol")
             shouldContainText "before" p1
             shouldContainText "inner" ol
@@ -1225,7 +1287,7 @@ tests withDebugging wdConfig caps _selenium = do
             shouldContainText "before\ninner\nafter" p1
             elementShouldBeRemoved ol
             elementShouldBeRemoved p2
-      testWidget' static check $ do
+      testWidget' preSwitchover check $ do
         -- This is deliberately invalid HTML, the browser will interpret it as
         -- <p>before</p><ol>inner</ol>after<p></p>
         el "p" $ do
@@ -1308,8 +1370,8 @@ withRetry a = wait 300
   where wait :: Int -> WD a
         wait 0 = a
         wait n = try a >>= \case
-          Left (_ :: SomeException) -> do
-            liftIO $ threadDelay 100000
+          Left (e :: SomeException) -> do
+            liftIO $ putStrLn ("(retrying due to " <> show e <> ")") *> threadDelay 100000
             wait $ n - 1
           Right v -> return v
 
@@ -1359,7 +1421,7 @@ testWidgetDebug' withDebugging beforeJS afterSwitchover bodyWidget = do
           bodyWidget
           el "script" $ text $ TE.decodeUtf8 $ LBS.toStrict $ jsaddleJs False
   putStrLnDebug "rendering static"
-  ((), html) <- liftIO $ renderStatic staticApp
+  ((), html) <- liftIO $ renderStatic $ runHydratableT staticApp
   putStrLnDebug "rendered static"
   waitBeforeJS <- liftIO newEmptyMVar -- Empty until JS should be run
   waitUntilSwitchover <- liftIO newEmptyMVar -- Empty until switchover
@@ -1391,23 +1453,26 @@ testWidgetDebug' withDebugging beforeJS afterSwitchover bodyWidget = do
         ]
       -- hSilence to get rid of ConnectionClosed logs
       silenceIfDebug = if withDebugging then id else hSilence [stderr]
-      jsaddleWarp = forkIO $ silenceIfDebug $ Warp.runSettings settings application
-  jsaddleTid <- liftIO jsaddleWarp
-  putStrLnDebug "taking waitJSaddle"
-  liftIO $ takeMVar waitJSaddle
-  putStrLnDebug "opening page"
-  WD.openPage $ "http://localhost:" <> show jsaddlePort
-  putStrLnDebug "running beforeJS"
-  a <- beforeJS
-  putStrLnDebug "putting waitBeforeJS"
-  liftIO $ putMVar waitBeforeJS ()
-  putStrLnDebug "taking waitUntilSwitchover"
-  liftIO $ takeMVar waitUntilSwitchover
-  putStrLnDebug "running afterSwitchover"
-  b <- afterSwitchover a
-  putStrLnDebug "killing jsaddle thread"
-  liftIO $ killThread jsaddleTid
-  return b
+      jsaddleWarp = silenceIfDebug $ Warp.runSettings settings application
+  withAsync' jsaddleWarp $ do
+    putStrLnDebug "taking waitJSaddle"
+    liftIO $ takeMVar waitJSaddle
+    putStrLnDebug "opening page"
+    WD.openPage $ "http://localhost:" <> show jsaddlePort
+    putStrLnDebug "running beforeJS"
+    a <- beforeJS
+    putStrLnDebug "putting waitBeforeJS"
+    liftIO $ putMVar waitBeforeJS ()
+    putStrLnDebug "taking waitUntilSwitchover"
+    liftIO $ takeMVar waitUntilSwitchover
+    putStrLnDebug "running afterSwitchover"
+    afterSwitchover a
+
+withAsync' :: (MonadIO m, MonadMask m) => IO a -> m b -> m b
+withAsync' f g = bracket
+  (liftIO $ Async.async f)
+  (liftIO . Async.uninterruptibleCancel)
+  (const g)
 
 data Key2 a where
   Key2_Int :: Int -> Key2 Int
@@ -1417,12 +1482,3 @@ deriveGEq ''Key2
 deriveGCompare ''Key2
 deriveGShow ''Key2
 deriveArgDict ''Key2
-
-instance ShowTag Key2 Identity where
-  showTaggedPrec = \case
-    Key2_Int _ -> showsPrec
-    Key2_Char _ -> showsPrec
-
-instance EqTag Key2 Identity where
-  eqTagged (Key2_Int _) (Key2_Int _) = (==)
-  eqTagged (Key2_Char _) (Key2_Char _) = (==)
